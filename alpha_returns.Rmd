@@ -1,0 +1,117 @@
+---
+title: "Alpha Returns"
+output: flexdashboard::flex_dashboard
+runtime: shiny
+---
+
+```{r global, include=FALSE}
+library(tidyverse)
+library(PerformanceAnalytics)
+library(quantmod)
+library(rollRegres) #very fast rolling regression library
+```
+
+Sidebar {.sidebar}
+=====================================
+
+```{r}
+
+fluidRow(
+  column(6,
+  textInput("ticker","Ticker","AXP"))
+)
+fluidRow(
+  column(6,
+  textInput("index","Index","SPY"))
+)
+fluidRow(
+  column(7,
+  dateInput("date",
+  "Starting Date",
+  "2013-01-01",
+  format="yyyy-mm-dd"))
+)
+fluidRow(
+  column(6,
+  textInput("beta_days","Rolling Beta Window","60"))
+)
+
+
+actionButton("go","Submit")
+
+portfolio_returns_byhand <- eventReactive(input$go, {
+symbols <- c(input$ticker,
+             input$index)
+
+beta_days <- as.numeric(input$beta_days)
+
+#QUANTMOD GET PRICES
+prices <- getSymbols(symbols,
+                     src="yahoo",
+                     from=input$date,
+                     to=Sys.Date(),
+                     auto.assign=TRUE,
+                     warnings=FALSE) %>%
+  map(~Ad(get(.))) %>%
+  reduce(merge) %>%
+  'colnames<-'(c("ticker","index"))
+
+#USE PORTFOLIO ANALYTICS FOR LOG RETURNS
+asset_returns_daily <- prices %>%
+  Return.calculate(method="log") %>%
+  na.omit()
+
+#ROLLING REGRESSION
+m.returns <- as.matrix(merge(asset_returns_daily[,2], asset_returns_daily[,1]))
+v.X  <- cbind(1, m.returns[, 1])
+v.Y <- m.returns[, -1, drop = FALSE]
+roll_out <- apply(v.Y, 2, function(y)
+  roll_regres.fit(x = v.X, y = y, width = beta_days)$coefs[, 2])
+
+#SOME XTS PRETZEL LOGIC
+xts.returns<-as.xts(roll_out)
+xts.returns<-data.frame(date=index(xts.returns), coredata(xts.returns)) %>%
+  select(-date)
+colnames(xts.returns)<-c("beta")
+
+#MAGRITTR CREATE COLUMNS FOR GRAPHING
+asset_returns_daily<-(cbind(xts.returns,data.frame(date=index(asset_returns_daily), coredata(asset_returns_daily)))) %>%
+  select(date,ticker,index,beta) %>%
+  mutate(predicted=index*beta) %>%
+  mutate(alpha=ticker-predicted) %>%
+  mutate(cpalpha=(1+alpha)) %>%
+  mutate(cpindex=1+index) %>%
+  mutate(cpticker=1+ticker) %>%
+  na.omit()
+
+#CALCULATE CUMULATIVE PRODUCT
+fun_cumulative_prod <- function(x) cumprod(x) #HELPER FUNCTION
+
+asset_returns_daily[,7:9]<-lapply(asset_returns_daily[,7:9],FUN = fun_cumulative_prod)
+
+portfolio_returns_byhand<-asset_returns_daily
+
+})
+```
+
+Returns
+=====================================  
+
+
+Row {.tabset .tabset-fade}
+-------------------------------------
+
+
+```{r}
+renderPlot({
+  portfolio_returns_byhand() %>%
+  ggplot(aes(x=date)) +
+  geom_line(aes(y=cpalpha,color="Alpha")) +
+  geom_line(aes(y=cpindex,color=input$index)) +
+  geom_line(aes(y=cpticker,color=input$ticker)) +
+  theme_minimal() +
+  labs(title="Cumulative Daily Alpha") +
+  labs(color="")
+})
+```
+
